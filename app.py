@@ -7,6 +7,9 @@ from typing import List, Optional, Dict
 import pandas as pd
 from flask import Flask, request, jsonify, send_file, render_template
 
+# ⭐ 新增：把 Flask 包成 ASGI
+from starlette.middleware.wsgi import WSGIMiddleware
+
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
 
@@ -68,7 +71,6 @@ def build_update_sql(
     skip_nulls_in_set: bool,
     alias_map: Dict[str, str],
 ) -> str:
-    # WHERE 主键使用别名列名，值来自原列
     where_parts = [
         f"{backtick(map_col(k, alias_map))} = {sql_serialize_value(row.get(k, None))}"
         for k in primary_keys
@@ -101,17 +103,15 @@ def build_upsert_sql(
     table_name: str,
     insert_cols_src: List[str],
     upsert_update_cols_src: List[str],
-    mysql_version: str,  # 预留切换别名写法
+    mysql_version: str,
     skip_nulls_in_set: bool,
     alias_map: Dict[str, str],
 ) -> str:
-    # INSERT 部分
     insert_cols_mapped = [map_col(c, alias_map) for c in insert_cols_src]
     ensure_unique(insert_cols_mapped)
     col_list = ", ".join(backtick(c) for c in insert_cols_mapped)
     val_list = ", ".join(sql_serialize_value(row.get(src, None)) for src in insert_cols_src)
 
-    # UPDATE 部分（使用 VALUES(mapped_col)）
     set_parts = []
     for src in upsert_update_cols_src:
         v = row.get(src, None)
@@ -150,7 +150,6 @@ def generate_sql_file(
     if stmt == "UPDATE":
         upd_cols_src = update_columns if update_columns else [c for c in all_cols if c not in primary_keys]
     elif stmt in ("INSERT", "UPSERT"):
-        # 插入列：主键 ∪ 勾选列；未勾选则使用所有列
         if update_columns:
             insert_cols_src = []
             for c in all_cols:
@@ -167,7 +166,6 @@ def generate_sql_file(
     else:
         raise ValueError(f"不支持的语句类型：{stmt}")
 
-    # 输出 SQL 文件
     tmp = tempfile.NamedTemporaryFile(prefix="gen_", suffix=".sql", delete=False)
     out_path = tmp.name
     tmp.close()
@@ -178,7 +176,7 @@ def generate_sql_file(
                 sql = build_update_sql(row, table_name, primary_keys, upd_cols_src, skip_nulls_in_set, alias_map)
             elif stmt == "INSERT":
                 sql = build_insert_sql(row, table_name, insert_cols_src, alias_map)
-            else:  # UPSERT
+            else:
                 sql = build_upsert_sql(
                     row,
                     table_name,
@@ -195,6 +193,8 @@ def generate_sql_file(
 
 
 # -------------- 预览：返回 sheet 或列名 --------------
+from flask import request
+
 @app.post("/preview_columns")
 def preview_columns():
     try:
@@ -276,6 +276,10 @@ def generate():
         return jsonify({"error": str(e)}), 500
 
 
+# ⭐ 把 Flask 应用包成 ASGI，给 Uvicorn 跑
+asgi_app = WSGIMiddleware(app)
+
+# 本地开发：python app.py 直接跑（用 Uvicorn）
 if __name__ == "__main__":
-    # 6000 是浏览器不安全端口；用 5000/8000/8080 等
-    app.run(host="0.0.0.0", port=12080, debug=True)
+    import uvicorn
+    uvicorn.run("app:asgi_app", host="0.0.0.0", port=12080, reload=True, lifespan="off")
