@@ -1,10 +1,18 @@
-FROM python:3.10-slim
+# ✅ 改成从你自己的 ACR 拉基础镜像
+FROM crpi-v2fmzydhnzmlpzjc.cn-shanghai.personal.cr.aliyuncs.com/machenkai/python:3.10-slim
 
+# 设置工作目录
 WORKDIR /app
+
+# 拷贝代码到容器
 COPY . /app
 
-# 升级 pip/工具链，并把默认超时调高
-RUN pip install --no-cache-dir  -r requirements.txt
+# 安装依赖（建议加国内 pip 源加速）
+RUN pip install --no-cache-dir -r requirements.txt \
+    && rm -rf /root/.cache/pip
 
+# 暴露端口
 EXPOSE 12080
+
+# 启动命令
 CMD ["python", "app.py"]
