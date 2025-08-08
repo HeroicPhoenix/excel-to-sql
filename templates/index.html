@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Excel ➜ MySQL SQL 生成器</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .glass { background: rgba(255,255,255,0.85); backdrop-filter: blur(8px); }
+    .dropzone.dragover { border-color: rgb(59 130 246); background: rgba(59,130,246,0.06); }
+    .alias-input { display:none; }
+    .alias-show .alias-input { display:block; }
+  </style>
+</head>
+<body class="bg-gradient-to-br from-slate-100 via-indigo-100 to-sky-100 min-h-screen">
+<div class="max-w-6xl mx-auto px-4 py-10">
+  <h1 class="text-3xl font-extrabold text-slate-900">Excel ➜ MySQL UPDATE / INSERT / UPSERT 生成器</h1>
+  <p class="text-slate-600 mt-1">上传 Excel，选择 Sheet、主键与列（支持列别名），适配 MySQL 5.7 / 8.0。</p>
+
+  <div id="toast" class="hidden mt-4 p-3 rounded-lg text-sm"></div>
+
+  <!-- 上传 -->
+  <div id="dropzone" class="glass border-2 border-dashed border-slate-300 p-6 rounded-xl cursor-pointer text-center mt-6">
+    <p class="font-medium">拖拽 Excel 到这里，或点击选择</p>
+    <p class="text-xs text-slate-500">支持 .xlsx / .xls</p>
+    <input id="fileInput" type="file" accept=".xlsx,.xls" class="hidden"/>
+    <div id="fileInfo" class="text-sm mt-2 text-slate-500"></div>
+  </div>
+
+  <!-- 表单 -->
+  <form id="form" class="glass mt-6 p-6 rounded-xl grid grid-cols-1 md:grid-cols-2 gap-6">
+    <div class="md:col-span-2">
+      <label class="block text-sm font-medium text-slate-700 mb-1">目标表名 <span class="text-rose-600">*</span></label>
+      <input id="tableName" class="w-full border rounded px-3 py-2" placeholder="如：biz_order" required/>
+    </div>
+
+    <div>
+      <label class="block text-sm font-medium text-slate-700 mb-1">MySQL 版本</label>
+      <select id="mysqlVersion" class="w-full border rounded px-3 py-2">
+        <option value="mysql57">MySQL 5.7</option>
+        <option value="mysql80" selected>MySQL 8.0</option>
+      </select>
+    </div>
+
+    <div>
+      <label class="block text-sm font-medium text-slate-700 mb-1">语句类型</label>
+      <select id="stmt" class="w-full border rounded px-3 py-2">
+        <option value="UPDATE" selected>UPDATE</option>
+        <option value="INSERT">INSERT</option>
+        <option value="UPSERT">UPSERT（INSERT ... ON DUPLICATE KEY UPDATE）</option>
+      </select>
+    </div>
+
+    <div class="md:col-span-2">
+      <label class="block text-sm font-medium text-slate-700 mb-1">选择 Sheet</label>
+      <select id="sheetSelect" class="w-full border rounded px-3 py-2"></select>
+    </div>
+
+    <div>
+      <label class="block text-sm font-medium text-slate-700 mb-1">主键列（可多选）</label>
+      <div id="pkColumns" class="space-y-2 text-sm"></div>
+    </div>
+
+    <div>
+      <label class="block text-sm font-medium text-slate-700 mb-1">
+        更新列（可多选）
+        <span class="text-xs text-slate-500 block">
+          UPDATE：作为 SET 列；INSERT：插入列 = 主键 ∪ 勾选列（未勾选则使用所有列）；
+          UPSERT：INSERT 列同上，冲突更新列默认为勾选列（未勾选则所有非主键列）。
+        </span>
+      </label>
+      <div id="updateColumns" class="space-y-2 text-sm"></div>
+    </div>
+
+    <div class="flex items-center gap-2 md:col-span-2">
+      <input id="skipNulls" type="checkbox" class="h-4 w-4" checked>
+      <label for="skipNulls" class="text-sm text-slate-700">
+        UPDATE/UPSERT 时：SET 中跳过空值（否则写入 NULL 或用 VALUES(col) 覆盖）
+      </label>
+    </div>
+
+    <div class="md:col-span-2">
+      <button class="bg-indigo-600 text-white px-5 py-3 rounded-xl">生成 SQL 并下载</button>
+    </div>
+  </form>
+</div>
+
+<script>
+let pickedFile = null;
+
+function showToast(msg, type='info'){
+  const t=document.getElementById('toast');
+  t.classList.remove('hidden'); t.textContent=msg; t.className='mt-4 p-3 rounded-lg text-sm';
+  if(type==='error') t.classList.add('bg-rose-50','text-rose-700');
+  else if(type==='success') t.classList.add('bg-emerald-50','text-emerald-700');
+  else t.classList.add('bg-slate-50','text-slate-700');
+}
+
+// 生成一行：checkbox + 原列名 + 别名输入框
+function makeRow(col, groupClass){
+  const wrapper=document.createElement('div');
+  wrapper.className='flex flex-col sm:flex-row sm:items-center gap-2 border rounded px-3 py-2';
+
+  const line=document.createElement('div');
+  line.className='flex items-center gap-2';
+
+  const cb=document.createElement('input');
+  cb.type='checkbox'; cb.value=col; cb.className=groupClass+' mr-1';
+  const label=document.createElement('span'); label.textContent=col;
+
+  line.appendChild(cb); line.appendChild(label);
+  wrapper.appendChild(line);
+
+  const aliasBox=document.createElement('div');
+  aliasBox.className='alias-input w-full sm:w-72';
+  const aliasInput=document.createElement('input');
+  aliasInput.type='text';
+  aliasInput.placeholder='数据库列名（别名，可改）';
+  aliasInput.value=col;
+  aliasInput.className='w-full border rounded px-2 py-1 text-sm';
+  aliasInput.dataset.srcCol = col;
+  aliasBox.appendChild(aliasInput);
+  wrapper.appendChild(aliasBox);
+
+  // 勾选时显示/隐藏别名输入
+  cb.addEventListener('change', ()=>{
+    if(cb.checked){ wrapper.classList.add('alias-show'); }
+    else{ wrapper.classList.remove('alias-show'); }
+  });
+
+  return {wrapper, checkbox:cb, aliasInput};
+}
+
+function renderColumns(columns){
+  const pk=document.getElementById('pkColumns');
+  const upd=document.getElementById('updateColumns');
+  pk.innerHTML=''; upd.innerHTML='';
+
+  const pkItems = new Map();  // col -> {checkbox, aliasInput}
+  const upItems = new Map();
+
+  columns.forEach(col=>{
+    const pkRow = makeRow(col, 'pk-cb');
+    const upRow = makeRow(col, 'upd-cb');
+    pk.appendChild(pkRow.wrapper);
+    upd.appendChild(upRow.wrapper);
+    pkItems.set(col, pkRow);
+    upItems.set(col, upRow);
+  });
+
+  // 互斥：同名列在另一组禁用 + 取消勾选 + 隐藏别名框
+  pkItems.forEach((row, col)=>{
+    row.checkbox.addEventListener('change', ()=>{
+      const other = upItems.get(col);
+      other.checkbox.disabled = row.checkbox.checked;
+      if(row.checkbox.checked){
+        other.checkbox.checked = false;
+        other.wrapper.classList.remove('alias-show');
+      }
+    });
+  });
+  upItems.forEach((row, col)=>{
+    row.checkbox.addEventListener('change', ()=>{
+      const other = pkItems.get(col);
+      other.checkbox.disabled = row.checkbox.checked;
+      if(row.checkbox.checked){
+        other.checkbox.checked = false;
+        other.wrapper.classList.remove('alias-show');
+      }
+    });
+  });
+}
+
+async function fetchSheets(file){
+  const fd=new FormData(); fd.append('file', file);
+  const res=await fetch('/preview_columns',{method:'POST', body: fd});
+  const data=await res.json();
+  if(data.error){ showToast(data.error,'error'); return; }
+  const sel=document.getElementById('sheetSelect'); sel.innerHTML='';
+  data.sheets.forEach(s=>{ const o=document.createElement('option'); o.value=s; o.textContent=s; sel.appendChild(o); });
+  if(data.sheets.length>0){ sel.value=data.sheets[0]; await fetchColumns(file, data.sheets[0]); }
+}
+
+async function fetchColumns(file, sheetName){
+  const fd=new FormData(); fd.append('file', file); fd.append('sheet_name', sheetName);
+  const res=await fetch('/preview_columns',{method:'POST', body: fd});
+  const data=await res.json();
+  if(data.error){ showToast(data.error,'error'); return; }
+  renderColumns(data.columns);
+}
+
+function setFile(f){
+  if(!/\.(xlsx|xls)$/i.test(f.name)){ showToast('请上传 .xlsx 或 .xls 文件','error'); return; }
+  pickedFile=f;
+  document.getElementById('fileInfo').textContent=`已选择：${f.name}`;
+  fetchSheets(f);
+}
+
+// 拖拽/选择
+const dropzone=document.getElementById('dropzone');
+['dragenter','dragover'].forEach(evt=>dropzone.addEventListener(evt,e=>{e.preventDefault();dropzone.classList.add('dragover');}));
+['dragleave','drop'].forEach(evt=>dropzone.addEventListener(evt,e=>{e.preventDefault();dropzone.classList.remove('dragover');}));
+dropzone.addEventListener('click',()=>document.getElementById('fileInput').click());
+document.getElementById('fileInput').addEventListener('change',e=>{const f=e.target.files?.[0]; if(f) setFile(f);});
+dropzone.addEventListener('drop',e=>{const f=e.dataTransfer.files?.[0]; if(f) setFile(f);});
+
+// 切换 Sheet 时重新加载列
+document.getElementById('sheetSelect').addEventListener('change', e=>{
+  if(pickedFile && e.target.value) fetchColumns(pickedFile, e.target.value);
+});
+
+// 提交生成
+document.getElementById('form').addEventListener('submit', async e=>{
+  e.preventDefault();
+  if(!pickedFile) return showToast('请先上传 Excel 文件','error');
+
+  const tableName=document.getElementById('tableName').value.trim();
+  if(!tableName) return showToast('请输入表名','error');
+
+  const sheetName=document.getElementById('sheetSelect').value;
+  if(!sheetName) return showToast('请选择 Sheet','error');
+
+  const pkChecked = Array.from(document.querySelectorAll('#pkColumns .pk-cb:checked'));
+  if(pkChecked.length===0) return showToast('请至少选择一个主键列','error');
+  const updChecked = Array.from(document.querySelectorAll('#updateColumns .upd-cb:checked'));
+
+  // 收集列集合
+  const pkCols = pkChecked.map(cb => cb.value);
+  const updCols = updChecked.map(cb => cb.value);
+
+  // 收集别名映射（只传勾选的列；未勾选的忽略）
+  const aliasMap = {};
+
+  // 主键别名
+  pkChecked.forEach(cb=>{
+    const aliasInput = cb.closest('div').parentElement.querySelector('.alias-input input');
+    const alias = (aliasInput?.value || cb.value).trim();
+    if(alias && alias !== cb.value) aliasMap[cb.value] = alias;
+  });
+
+  // 更新列别名
+  updChecked.forEach(cb=>{
+    const aliasInput = cb.closest('div').parentElement.querySelector('.alias-input input');
+    const alias = (aliasInput?.value || cb.value).trim();
+    if(alias && alias !== cb.value) aliasMap[cb.value] = alias;
+  });
+
+  const stmt=document.getElementById('stmt').value;
+  const mysqlVersion=document.getElementById('mysqlVersion').value;
+  const skipNulls=document.getElementById('skipNulls').checked ? 'true':'false';
+
+  const fd=new FormData();
+  fd.append('file', pickedFile);
+  fd.append('table_name', tableName);
+  fd.append('sheet_name', sheetName);
+  fd.append('primary_keys', pkCols.join(','));
+  if(updCols.length>0) fd.append('update_columns', updCols.join(','));
+  fd.append('stmt', stmt);
+  fd.append('mysql_version', mysqlVersion);
+  fd.append('skip_nulls_in_set', skipNulls);
+  fd.append('column_alias_json', JSON.stringify(aliasMap));
+
+  try{
+    const res=await fetch('/generate',{method:'POST', body: fd});
+    if(!res.ok){
+      const msg=await res.text();
+      throw new Error(msg || '生成失败');
+    }
+    const blob=await res.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url; a.download=`${stmt.toLowerCase()}_${tableName}.sql`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    showToast('生成成功，已下载 SQL','success');
+  }catch(err){ showToast(err.message || '生成失败','error'); }
+});
+</script>
+</body>
+</html>
