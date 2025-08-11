@@ -10,6 +10,9 @@ from flask import Flask, request, jsonify, send_file, render_template
 # ⭐ 新增：把 Flask 包成 ASGI
 from starlette.middleware.wsgi import WSGIMiddleware
 
+# ⭐ 新增：用于打印异常堆栈
+import traceback
+
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
 
@@ -140,7 +143,19 @@ def generate_sql_file(
     skip_nulls_in_set: bool,
     alias_map: Dict[str, str],
 ) -> str:
-    df = pd.read_excel(excel_file_path, sheet_name=sheet_name)
+    # ⭐ 新增：读取 Excel 的日志与异常捕获（便于定位问题）
+    try:
+        print(f"[INFO] 正在读取 Excel 文件: {excel_file_path} | sheet={sheet_name}")
+        df = pd.read_excel(excel_file_path, sheet_name=sheet_name)
+        print(f"[INFO] 读取成功: 行数={len(df)}, 列数={len(df.columns)}")
+    except Exception as e:
+        print(f"[ERROR] 读取 Excel 失败: {excel_file_path} | sheet={sheet_name}")
+        print(f"[ERROR] 错误类型: {type(e).__name__}")
+        print(f"[ERROR] 错误详情: {e}")
+        print("[ERROR] 堆栈：")
+        traceback.print_exc()
+        raise  # 保持原有行为：向上抛出，由路由层处理
+
     all_cols = list(df.columns)
 
     if not set(primary_keys).issubset(all_cols):
@@ -207,15 +222,39 @@ def preview_columns():
             excel_path = tmp.name
 
         sheet_name = request.form.get("sheet_name")
-        xls = pd.ExcelFile(excel_path)
+
+        # ⭐ 新增：读取工作簿的日志与异常输出
+        try:
+            print(f"[INFO] 预览阶段：尝试加载工作簿结构: {excel_path}")
+            xls = pd.ExcelFile(excel_path)
+            print(f"[INFO] 加载成功，可用 sheets={xls.sheet_names}")
+        except Exception as e:
+            print(f"[ERROR] 无法读取 Excel 工作簿: {excel_path}")
+            print(f"[ERROR] 错误类型: {type(e).__name__}")
+            print(f"[ERROR] 错误详情: {e}")
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
 
         if not sheet_name:
             return jsonify({"sheets": xls.sheet_names})
 
-        df = pd.read_excel(excel_path, sheet_name=sheet_name, nrows=0)
+        # ⭐ 新增：读取指定 sheet 的日志与异常输出
+        try:
+            print(f"[INFO] 预览阶段：尝试读取列名 sheet={sheet_name} | {excel_path}")
+            df = pd.read_excel(excel_path, sheet_name=sheet_name, nrows=0)
+            print(f"[INFO] 列名读取成功: {list(df.columns)}")
+        except Exception as e:
+            print(f"[ERROR] 无法读取指定 sheet: {sheet_name} | 文件: {excel_path}")
+            print(f"[ERROR] 错误类型: {type(e).__name__}")
+            print(f"[ERROR] 错误详情: {e}")
+            traceback.print_exc()
+            return jsonify({"error": str(e)}), 500
+
         return jsonify({"columns": list(df.columns)})
 
     except Exception as e:
+        print("[ERROR] 预览列信息失败：", e)
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -252,6 +291,8 @@ def generate():
         with tempfile.NamedTemporaryFile(prefix="excel_", suffix=Path(uploaded.filename).suffix, delete=False) as tmp:
             uploaded.save(tmp.name)
             excel_path = tmp.name
+            # ⭐ 新增：生成阶段也打印一下落盘路径
+            print(f"[INFO] 生成阶段：上传 Excel 已保存至临时文件: {excel_path}")
 
         sql_path = generate_sql_file(
             excel_file_path=excel_path,
@@ -273,6 +314,8 @@ def generate():
         )
 
     except Exception as e:
+        print("[ERROR] /generate 接口生成失败：", e)
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
